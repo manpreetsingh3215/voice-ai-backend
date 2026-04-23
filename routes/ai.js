@@ -3,6 +3,7 @@ import multer from "multer";
 import axios from "axios";
 import fs from "fs";
 import FormData from "form-data";
+import { ApiResponse } from "../utils/apiResponse.js";
 
 const router = express.Router();
 const upload = multer({ dest: "uploads/" });
@@ -42,10 +43,19 @@ router.post("/chat", async (req, res) => {
     try {
         const { message, systemPrompt } = req.body;
 
+        // Validate input
+        if (!message || typeof message !== "string" || message.trim().length === 0) {
+            return res.status(400).json(
+                ApiResponse.validationError("Message is required and must be a non-empty string")
+            );
+        }
+
         // Validate input for health/fitness topics
         const validation = validateUserInput(message);
         if (!validation.valid) {
-            return res.status(400).json({ error: validation.error });
+            return res.status(403).json(
+                ApiResponse.contentPolicyViolation(validation.error)
+            );
         }
 
         const promptToUse = systemPrompt || DEFAULT_SYSTEM_PROMPT;
@@ -66,12 +76,24 @@ router.post("/chat", async (req, res) => {
             }
         );
 
-        res.json({
-            reply: response.data.choices[0].message.content,
-        });
+        res.status(200).json(
+            ApiResponse.success(
+                { reply: response.data.choices[0].message.content },
+                "Message processed successfully"
+            )
+        );
     } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).send("Error");
+        console.error("Chat error:", err.response?.data || err.message);
+
+        if (err.response?.status === 401) {
+            return res.status(401).json(
+                ApiResponse.unauthorized("OpenAI API key is invalid or expired")
+            );
+        }
+
+        res.status(500).json(
+            ApiResponse.serverError("Failed to process chat message")
+        );
     }
 });
 
@@ -80,11 +102,21 @@ router.post("/chat-stream", async (req, res) => {
     try {
         const { message, systemPrompt } = req.body;
 
+        // Validate input
+        if (!message || typeof message !== "string" || message.trim().length === 0) {
+            res.setHeader("Content-Type", "application/json");
+            return res.status(400).json(
+                ApiResponse.validationError("Message is required and must be a non-empty string")
+            );
+        }
+
         // Validate input for health/fitness topics
         const validation = validateUserInput(message);
         if (!validation.valid) {
             res.setHeader("Content-Type", "application/json");
-            return res.status(400).json({ error: validation.error });
+            return res.status(403).json(
+                ApiResponse.contentPolicyViolation(validation.error)
+            );
         }
 
         const promptToUse = systemPrompt || DEFAULT_SYSTEM_PROMPT;
@@ -150,8 +182,8 @@ router.post("/chat-stream", async (req, res) => {
         });
 
     } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
+        console.error("Chat stream error:", err.message);
+        res.write(`data: ${JSON.stringify({ error: "Failed to process stream" })}\n\n`);
         res.end();
     }
 });
@@ -159,6 +191,12 @@ router.post("/chat-stream", async (req, res) => {
 // 🔹 AUDIO → TEXT (Whisper)
 router.post("/speech-to-text", upload.single("audio"), async (req, res) => {
     try {
+        if (!req.file) {
+            return res.status(400).json(
+                ApiResponse.validationError("Audio file is required")
+            );
+        }
+
         const formData = new FormData();
         formData.append("file", fs.createReadStream(req.file.path));
         formData.append("model", "whisper-1");
@@ -174,18 +212,39 @@ router.post("/speech-to-text", upload.single("audio"), async (req, res) => {
             }
         );
 
-        res.json({ text: response.data.text });
+        res.status(200).json(
+            ApiResponse.success(
+                { text: response.data.text },
+                "Audio transcribed successfully"
+            )
+        );
 
-        fs.unlinkSync(req.file.path); // cleanup
+        fs.unlinkSync(req.file.path);
     } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).send("Error");
+        console.error("Speech-to-text error:", err.message);
+        if (req.file) fs.unlinkSync(req.file.path);
+
+        if (err.response?.status === 401) {
+            return res.status(401).json(
+                ApiResponse.unauthorized("OpenAI API key is invalid or expired")
+            );
+        }
+
+        res.status(500).json(
+            ApiResponse.serverError("Failed to transcribe audio")
+        );
     }
 });
 
 // 🔹 VOICE CHAT (Audio → Text → LLM → Text → Audio)
 router.post("/voice-chat", upload.single("audio"), async (req, res) => {
     try {
+        if (!req.file) {
+            return res.status(400).json(
+                ApiResponse.validationError("Audio file is required")
+            );
+        }
+
         const { systemPrompt } = req.body;
         const promptToUse = systemPrompt || DEFAULT_SYSTEM_PROMPT;
 
@@ -212,7 +271,9 @@ router.post("/voice-chat", upload.single("audio"), async (req, res) => {
         const validation = validateUserInput(userText);
         if (!validation.valid) {
             fs.unlinkSync(req.file.path);
-            return res.status(400).json({ error: validation.error });
+            return res.status(403).json(
+                ApiResponse.contentPolicyViolation(validation.error)
+            );
         }
 
         // Step 2: Get AI response using GPT
@@ -252,7 +313,7 @@ router.post("/voice-chat", upload.single("audio"), async (req, res) => {
             }
         );
 
-        // Step 4: Save audio and send response
+        // Step 4: Send audio response
         const audioBuffer = Buffer.from(ttsResponse.data);
 
         res.setHeader("Content-Type", "audio/mpeg");
@@ -263,8 +324,26 @@ router.post("/voice-chat", upload.single("audio"), async (req, res) => {
         fs.unlinkSync(req.file.path);
 
     } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).json({ error: err.message });
+        console.error("Voice chat error:", err.message);
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+
+        if (err.response?.status === 401) {
+            return res.status(401).json(
+                ApiResponse.unauthorized("OpenAI API key is invalid or expired")
+            );
+        }
+
+        if (err.response?.status === 400) {
+            return res.status(400).json(
+                ApiResponse.validationError("Invalid audio file format or request")
+            );
+        }
+
+        res.status(500).json(
+            ApiResponse.serverError("Failed to process voice chat")
+        );
     }
 });
 
