@@ -192,6 +192,71 @@ router.post("/speech-to-text", upload.single("audio"), async (req, res) => {
     }
 });
 
+// 🔹 TEXT → AUDIO (TTS STREAMING)
+router.post("/tts-stream", async (req, res) => {
+    try {
+        const { text, voice } = req.body;
+
+        if (!text || typeof text !== "string" || text.trim().length === 0) {
+            return res.status(400).json(
+                ApiResponse.validationError("Text is required and must be a non-empty string")
+            );
+        }
+
+        const ttsResponse = await axios.post(
+            "https://api.openai.com/v1/audio/speech",
+            {
+                model: "tts-1",
+                input: text.trim(),
+                voice: voice || "alloy",
+                response_format: "mp3",
+            },
+            {
+                headers: {
+                    Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+                },
+                responseType: "stream",
+            }
+        );
+
+        res.setHeader("Content-Type", "audio/mpeg");
+        res.setHeader("Transfer-Encoding", "chunked");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+
+        ttsResponse.data.on("error", (streamErr) => {
+            console.error("TTS stream error:", streamErr.message);
+            if (!res.headersSent) {
+                res.status(500).json(
+                    ApiResponse.serverError("Failed while streaming audio")
+                );
+            } else {
+                res.end();
+            }
+        });
+
+        ttsResponse.data.pipe(res);
+    } catch (err) {
+        console.error("TTS streaming error:", err.response?.data || err.message);
+
+        if (err.response?.status === 401) {
+            return res.status(401).json(
+                ApiResponse.unauthorized("OpenAI API key is invalid or expired")
+            );
+        }
+
+        if (err.response?.status === 400) {
+            return res.status(400).json(
+                ApiResponse.validationError("Invalid text, voice, or TTS request")
+            );
+        }
+
+        res.status(500).json(
+            ApiResponse.serverError("Failed to stream TTS audio")
+        );
+    }
+});
+
 // 🔹 VOICE CHAT (Audio → Text → LLM → Text → Audio)
 router.post("/voice-chat", upload.single("audio"), async (req, res) => {
     try {
